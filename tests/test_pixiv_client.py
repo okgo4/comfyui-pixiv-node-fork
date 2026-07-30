@@ -2,7 +2,7 @@ import re
 import time
 import pytest
 from unittest.mock import MagicMock, patch
-from pixiv_client import PixivClient
+from pixiv_client import PixivClient, is_pximg_url
 
 
 def make_client(token=None):
@@ -57,6 +57,18 @@ def test_login_with_code_saves_token_and_returns_it():
     client.config.save_refresh_token.assert_called_once_with("saved_token_456")
     assert result == "saved_token_456"
     assert client._logged_in is True
+
+
+def test_login_with_refresh_token_saves_state():
+    client = make_client()
+    client.api = MagicMock()
+
+    client.login_with_refresh_token("refresh_123")
+
+    client.api.auth.assert_called_once_with(refresh_token="refresh_123")
+    client.config.save_refresh_token.assert_called_once_with("refresh_123")
+    assert client._logged_in is True
+    assert client._auth_time > 0
 
 
 def test_ensure_logged_in_uses_stored_token():
@@ -218,6 +230,25 @@ def test_get_bookmarked_artists_returns_formatted():
     assert result["artists"][0]["name"] == "Artist1"
 
 
+def test_search_users_uses_shared_artist_format():
+    client = make_client(token="tok")
+    client._logged_in = True
+    preview = MagicMock()
+    preview.user.id = 888
+    preview.user.name = "Artist2"
+    preview.user.profile_image_urls.medium = "https://i.pximg.net/avatar2.jpg"
+    client.api = MagicMock()
+    client.api.search_user.return_value = MagicMock(
+        user_previews=[preview], next_url="next"
+    )
+
+    result = client.search_users("Artist2")
+
+    client.api.search_user.assert_called_once_with(word="Artist2")
+    assert result["artists"][0]["id"] == 888
+    assert result["next_url"] == "next"
+
+
 def test_get_artist_works_passes_artist_id():
     client = make_client(token="tok")
     client._logged_in = True
@@ -253,6 +284,20 @@ def test_fmt_illusts_includes_all_pages():
 
 # ── Download tests ────────────────────────────────────────────────────────────
 
+@pytest.mark.parametrize(
+    ("url", "allowed"),
+    [
+        ("https://i.pximg.net/img/test.jpg", True),
+        ("https://pximg.net/img/test.jpg", True),
+        ("http://i.pximg.net/img/test.jpg", False),
+        ("https://pximg.net.evil.example/img.jpg", False),
+        ("https://evil.example/img.jpg?host=pximg.net", False),
+    ],
+)
+def test_is_pximg_url(url, allowed):
+    assert is_pximg_url(url) is allowed
+
+
 def test_download_image_bytes_sets_referer_header():
     client = make_client(token="tok")
     client._logged_in = True
@@ -262,10 +307,10 @@ def test_download_image_bytes_sets_referer_header():
     fake_response.content = b"\xff\xd8\xff"
     fake_response.raise_for_status = MagicMock()
 
-    with patch("pixiv_client.requests.get", return_value=fake_response) as mock_get:
-        result = client.download_image_bytes("https://i.pximg.net/img/test.jpg")
+    client.http.get = MagicMock(return_value=fake_response)
+    result = client.download_image_bytes("https://i.pximg.net/img/test.jpg")
 
-    mock_get.assert_called_once_with(
+    client.http.get.assert_called_once_with(
         "https://i.pximg.net/img/test.jpg",
         headers={
             "Referer": "https://www.pixiv.net/",

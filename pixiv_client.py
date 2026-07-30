@@ -8,10 +8,19 @@ from urllib.parse import urlparse, parse_qs
 from pixivpy3 import AppPixivAPI
 
 
+def is_pximg_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and (
+        host == "pximg.net" or host.endswith(".pximg.net")
+    )
+
+
 class PixivClient:
     def __init__(self, config):
         self.config = config
         self.api = AppPixivAPI()
+        self.http = requests.Session()
         self._logged_in = False
         self._auth_time = 0.0
 
@@ -51,6 +60,12 @@ class PixivClient:
         self._auth_time = time.time()
         return token
 
+    def login_with_refresh_token(self, token: str):
+        self.api.auth(refresh_token=token)
+        self.config.save_refresh_token(token)
+        self._logged_in = True
+        self._auth_time = time.time()
+
     def ensure_logged_in(self):
         token = self.api.refresh_token or self.config.get_refresh_token()
         if not token:
@@ -86,16 +101,7 @@ class PixivClient:
     def get_bookmarked_artists(self, next_url=None):
         self.ensure_logged_in()
         kwargs = self._next_qs(next_url) if next_url else {"user_id": self.api.user_id}
-        result = self.api.user_following(**kwargs)
-        artists = [
-            {
-                "id": p.user.id,
-                "name": p.user.name,
-                "profile_image_urls": {"medium": p.user.profile_image_urls.medium},
-            }
-            for p in result.user_previews
-        ]
-        return {"artists": artists, "next_url": result.next_url}
+        return self._fmt_artists(self.api.user_following(**kwargs))
 
     def get_artist_works(self, artist_id, next_url=None):
         self.ensure_logged_in()
@@ -158,6 +164,19 @@ class PixivClient:
             })
         return {"illusts": illusts, "next_url": result.next_url}
 
+    def _fmt_artists(self, result):
+        artists = [
+            {
+                "id": preview.user.id,
+                "name": preview.user.name,
+                "profile_image_urls": {
+                    "medium": preview.user.profile_image_urls.medium,
+                },
+            }
+            for preview in result.user_previews
+        ]
+        return {"artists": artists, "next_url": result.next_url}
+
     # ── Image download ────────────────────────────────────────────────────────
 
     def download_image_bytes(self, url: str) -> bytes:
@@ -165,7 +184,7 @@ class PixivClient:
             "Referer": "https://www.pixiv.net/",
             "User-Agent": "PixivIOSApp/7.13.3 (iOS 14.6; iPhone13,2)",
         }
-        response = requests.get(url, headers=headers, timeout=30)
+        response = self.http.get(url, headers=headers, timeout=30)
         response.raise_for_status()
         return response.content
 
@@ -179,16 +198,7 @@ class PixivClient:
     def search_users(self, word, next_url=None):
         self.ensure_logged_in()
         kwargs = self._next_qs(next_url) if next_url else {"word": word}
-        result = self.api.search_user(**kwargs)
-        artists = [
-            {
-                "id": p.user.id,
-                "name": p.user.name,
-                "profile_image_urls": {"medium": p.user.profile_image_urls.medium},
-            }
-            for p in result.user_previews
-        ]
-        return {"artists": artists, "next_url": result.next_url}
+        return self._fmt_artists(self.api.search_user(**kwargs))
 
     def get_original_url(self, illust_id: int, page_index: int = 0) -> str:
         self.ensure_logged_in()

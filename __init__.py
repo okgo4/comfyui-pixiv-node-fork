@@ -1,8 +1,10 @@
 import traceback
 
 try:
+    import asyncio
+
     from .config import Config
-    from .pixiv_client import PixivClient
+    from .pixiv_client import PixivClient, is_pximg_url
 
     _config = Config()
     _client_instance = PixivClient(_config)
@@ -12,6 +14,24 @@ try:
     import aiohttp
 
     routes = PromptServer.instance.routes
+    _client_lock = asyncio.Lock()
+
+    async def _run_client(func, *args, **kwargs):
+        async with _client_lock:
+            return await asyncio.to_thread(func, *args, **kwargs)
+
+    async def _api_response(func, *args, **kwargs):
+        try:
+            return web.json_response(await _run_client(func, *args, **kwargs))
+        except RuntimeError as e:
+            return web.json_response({"error": str(e)}, status=401)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    def _client_action(method, value):
+        _client_instance.ensure_logged_in()
+        method(value)
+        return {"ok": True}
 
     # ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -46,7 +66,7 @@ try:
             return web.json_response({"error": "No pending auth"}, status=400)
         try:
             code = _client_instance.extract_code(redirect_url)
-            _client_instance.login_with_code(code, verifier)
+            await _run_client(_client_instance.login_with_code, code, verifier)
             return web.json_response({"ok": True})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
@@ -58,11 +78,7 @@ try:
         if not token:
             return web.json_response({"error": "refresh_token 不能为空"}, status=400)
         try:
-            import time
-            _client_instance.api.auth(refresh_token=token)
-            _client_instance._logged_in = True
-            _client_instance._auth_time = time.time()
-            _config.save_refresh_token(token)
+            await _run_client(_client_instance.login_with_refresh_token, token)
             return web.json_response({"ok": True})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
@@ -72,66 +88,45 @@ try:
     @routes.get("/pixiv/recommended")
     async def pixiv_recommended(request):
         next_url = request.query.get("next_url")
-        try:
-            return web.json_response(_client_instance.get_recommended(next_url=next_url))
-        except RuntimeError as e:
-            return web.json_response({"error": str(e)}, status=401)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        return await _api_response(_client_instance.get_recommended, next_url=next_url)
 
     @routes.get("/pixiv/followed")
     async def pixiv_followed(request):
         next_url = request.query.get("next_url")
-        try:
-            return web.json_response(_client_instance.get_followed(next_url=next_url))
-        except RuntimeError as e:
-            return web.json_response({"error": str(e)}, status=401)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        return await _api_response(_client_instance.get_followed, next_url=next_url)
 
     @routes.get("/pixiv/ranking")
     async def pixiv_ranking(request):
         mode = request.query.get("mode", "day")
         next_url = request.query.get("next_url")
-        try:
-            return web.json_response(_client_instance.get_ranking(mode=mode, next_url=next_url))
-        except RuntimeError as e:
-            return web.json_response({"error": str(e)}, status=401)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        return await _api_response(
+            _client_instance.get_ranking, mode=mode, next_url=next_url
+        )
 
     @routes.get("/pixiv/bookmarks")
     async def pixiv_bookmarks(request):
         next_url = request.query.get("next_url")
-        try:
-            return web.json_response(_client_instance.get_bookmarks(next_url=next_url))
-        except RuntimeError as e:
-            return web.json_response({"error": str(e)}, status=401)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        return await _api_response(_client_instance.get_bookmarks, next_url=next_url)
 
     @routes.get("/pixiv/bookmarked_artists")
     async def pixiv_bookmarked_artists(request):
         next_url = request.query.get("next_url")
-        try:
-            return web.json_response(_client_instance.get_bookmarked_artists(next_url=next_url))
-        except RuntimeError as e:
-            return web.json_response({"error": str(e)}, status=401)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        return await _api_response(
+            _client_instance.get_bookmarked_artists, next_url=next_url
+        )
 
     @routes.get("/pixiv/artist/{artist_id}/works")
     async def pixiv_artist_works(request):
-        artist_id = int(request.match_info["artist_id"])
-        next_url = request.query.get("next_url")
         try:
-            return web.json_response(
-                _client_instance.get_artist_works(artist_id=artist_id, next_url=next_url)
-            )
-        except RuntimeError as e:
-            return web.json_response({"error": str(e)}, status=401)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            artist_id = int(request.match_info["artist_id"])
+        except ValueError:
+            return web.json_response({"error": "invalid artist_id"}, status=400)
+        next_url = request.query.get("next_url")
+        return await _api_response(
+            _client_instance.get_artist_works,
+            artist_id=artist_id,
+            next_url=next_url,
+        )
 
     @routes.post("/pixiv/bookmark")
     async def pixiv_add_bookmark(request):
@@ -140,11 +135,12 @@ try:
         if not illust_id:
             return web.json_response({"error": "illust_id required"}, status=400)
         try:
-            _client_instance.ensure_logged_in()
-            _client_instance.api.illust_bookmark_add(int(illust_id))
-            return web.json_response({"ok": True})
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            illust_id = int(illust_id)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "invalid illust_id"}, status=400)
+        return await _api_response(
+            _client_action, _client_instance.api.illust_bookmark_add, illust_id
+        )
 
     @routes.post("/pixiv/bookmark_delete")
     async def pixiv_del_bookmark(request):
@@ -153,11 +149,12 @@ try:
         if not illust_id:
             return web.json_response({"error": "illust_id required"}, status=400)
         try:
-            _client_instance.ensure_logged_in()
-            _client_instance.api.illust_bookmark_delete(int(illust_id))
-            return web.json_response({"ok": True})
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            illust_id = int(illust_id)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "invalid illust_id"}, status=400)
+        return await _api_response(
+            _client_action, _client_instance.api.illust_bookmark_delete, illust_id
+        )
 
     @routes.get("/pixiv/search/illusts")
     async def pixiv_search_illusts(request):
@@ -165,12 +162,9 @@ try:
         next_url = request.query.get("next_url")
         if not word and not next_url:
             return web.json_response({"error": "word required"}, status=400)
-        try:
-            return web.json_response(_client_instance.search_illusts(word, next_url=next_url))
-        except RuntimeError as e:
-            return web.json_response({"error": str(e)}, status=401)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        return await _api_response(
+            _client_instance.search_illusts, word, next_url=next_url
+        )
 
     @routes.get("/pixiv/search/users")
     async def pixiv_search_users(request):
@@ -178,12 +172,9 @@ try:
         next_url = request.query.get("next_url")
         if not word and not next_url:
             return web.json_response({"error": "word required"}, status=400)
-        try:
-            return web.json_response(_client_instance.search_users(word, next_url=next_url))
-        except RuntimeError as e:
-            return web.json_response({"error": str(e)}, status=401)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        return await _api_response(
+            _client_instance.search_users, word, next_url=next_url
+        )
 
     @routes.post("/pixiv/follow")
     async def pixiv_add_follow(request):
@@ -192,29 +183,40 @@ try:
         if not user_id:
             return web.json_response({"error": "user_id required"}, status=400)
         try:
-            _client_instance.ensure_logged_in()
-            _client_instance.api.user_follow_add(int(user_id))
-            return web.json_response({"ok": True})
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            user_id = int(user_id)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "invalid user_id"}, status=400)
+        return await _api_response(
+            _client_action, _client_instance.api.user_follow_add, user_id
+        )
 
     # ── Image Proxy ───────────────────────────────────────────────────────────
 
     @routes.get("/pixiv/image_proxy")
     async def pixiv_image_proxy(request):
         url = request.query.get("url", "")
-        if "pximg.net" not in url:
+        if not is_pximg_url(url):
             return web.Response(status=403, text="Only pximg.net URLs allowed")
+        session = PromptServer.instance.client_session
+        if session is None or session.closed:
+            return web.Response(status=503, text="HTTP client is not ready")
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    headers={"Referer": "https://www.pixiv.net/"},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    data = await resp.read()
-                    ct = resp.headers.get("Content-Type", "image/jpeg")
-                    return web.Response(body=data, content_type=ct)
+            async with session.get(
+                url,
+                headers={"Referer": "https://www.pixiv.net/"},
+                timeout=aiohttp.ClientTimeout(total=30),
+                allow_redirects=False,
+            ) as resp:
+                if resp.status != 200:
+                    return web.Response(status=resp.status)
+                data = await resp.read()
+                content_type = resp.headers.get("Content-Type", "image/jpeg")
+                content_type = content_type.split(";", 1)[0]
+                return web.Response(
+                    body=data,
+                    content_type=content_type,
+                    headers={"Cache-Control": "public, max-age=86400"},
+                )
         except Exception as e:
             return web.Response(status=502, text=str(e))
 
