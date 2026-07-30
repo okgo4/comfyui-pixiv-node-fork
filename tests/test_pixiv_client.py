@@ -1,4 +1,5 @@
 import re
+import time
 import pytest
 from unittest.mock import MagicMock, patch
 from pixiv_client import PixivClient
@@ -61,6 +62,7 @@ def test_login_with_code_saves_token_and_returns_it():
 def test_ensure_logged_in_uses_stored_token():
     client = make_client(token="stored_token")
     mock_api = MagicMock()
+    mock_api.refresh_token = None
     client.api = mock_api
 
     client.ensure_logged_in()
@@ -78,7 +80,9 @@ def test_ensure_logged_in_raises_when_no_token():
 def test_ensure_logged_in_skips_if_already_logged_in():
     client = make_client(token="tok")
     client._logged_in = True
+    client._auth_time = time.time()
     mock_api = MagicMock()
+    mock_api.refresh_token = None
     client.api = mock_api
 
     client.ensure_logged_in()
@@ -92,11 +96,17 @@ def _mock_illust():
     i = MagicMock()
     i.id = 12345
     i.title = "Test Art"
+    i.width = 640
+    i.height = 480
     i.image_urls.medium = "https://i.pximg.net/medium/img.jpg"
     i.image_urls.large = "https://i.pximg.net/large/img.jpg"
+    i.meta_single_page = {"original_image_url": "https://i.pximg.net/original/img.jpg"}
+    i.meta_pages = []
+    i.is_bookmarked = False
     i.user.id = 999
     i.user.name = "TestArtist"
     i.user.profile_image_urls.medium = "https://i.pximg.net/avatar.jpg"
+    i.user.is_followed = False
     return i
 
 
@@ -122,16 +132,47 @@ def test_get_recommended_returns_formatted_illusts():
     assert result["next_url"] is None
 
 
+def test_get_followed_returns_formatted_illusts():
+    client = make_client(token="tok")
+    client._logged_in = True
+    client.api = MagicMock()
+    client.api.illust_follow.return_value = _mock_result([_mock_illust()])
+
+    result = client.get_followed()
+
+    client.api.illust_follow.assert_called_once_with(restrict="public")
+    assert result["illusts"][0]["id"] == 12345
+
+
+def test_get_followed_uses_next_page_query():
+    client = make_client(token="tok")
+    client._logged_in = True
+    client.api = MagicMock()
+    client.api.illust_follow.return_value = _mock_result()
+
+    with patch.object(
+        client, "_next_qs", return_value={"restrict": "public", "offset": "30"}
+    ) as mock_next_qs:
+        client.get_followed(
+            next_url="https://app-api.pixiv.net/v2/illust/follow?restrict=public&offset=30"
+        )
+
+    mock_next_qs.assert_called_once()
+    client.api.illust_follow.assert_called_once_with(restrict="public", offset="30")
+
+
 def test_get_recommended_next_page_calls_next_qs():
     client = make_client(token="tok")
     client._logged_in = True
     client.api = MagicMock()
-    client.api.next_qs.return_value = {"offset": "30"}
     client.api.illust_recommended.return_value = _mock_result()
 
-    client.get_recommended(next_url="https://app-api.pixiv.net/v1/illust/recommended?offset=30")
+    with patch.object(client, "_next_qs", return_value={"offset": "30"}) as mock_next_qs:
+        client.get_recommended(
+            next_url="https://app-api.pixiv.net/v1/illust/recommended?offset=30"
+        )
 
-    client.api.next_qs.assert_called_once()
+    mock_next_qs.assert_called_once()
     client.api.illust_recommended.assert_called_once_with(offset="30")
 
 
@@ -155,7 +196,7 @@ def test_get_bookmarks_uses_user_id():
 
     client.get_bookmarks()
 
-    client.api.user_bookmarks_illust.assert_called_once_with("42")
+    client.api.user_bookmarks_illust.assert_called_once_with(user_id="42")
 
 
 def test_get_bookmarked_artists_returns_formatted():
@@ -185,7 +226,29 @@ def test_get_artist_works_passes_artist_id():
 
     client.get_artist_works(artist_id=777)
 
-    client.api.user_illusts.assert_called_once_with(777)
+    client.api.user_illusts.assert_called_once_with(user_id=777)
+
+
+def test_fmt_illusts_includes_all_pages():
+    client = make_client(token="tok")
+    illust = _mock_illust()
+    illust.meta_single_page = {}
+    pages = []
+    for index in range(3):
+        page = MagicMock()
+        page.image_urls.medium = f"https://i.pximg.net/medium/p{index}.jpg"
+        page.image_urls.large = f"https://i.pximg.net/large/p{index}.jpg"
+        page.image_urls.original = f"https://i.pximg.net/original/p{index}.jpg"
+        pages.append(page)
+    illust.meta_pages = pages
+
+    result = client._fmt_illusts(_mock_result([illust]))
+
+    formatted = result["illusts"][0]
+    assert formatted["page_count"] == 3
+    assert [page["index"] for page in formatted["pages"]] == [0, 1, 2]
+    assert formatted["pages"][2]["original_url"].endswith("/p2.jpg")
+    assert formatted["original_url"].endswith("/p0.jpg")
 
 
 # ── Download tests ────────────────────────────────────────────────────────────
@@ -204,7 +267,10 @@ def test_download_image_bytes_sets_referer_header():
 
     mock_get.assert_called_once_with(
         "https://i.pximg.net/img/test.jpg",
-        headers={"Referer": "https://www.pixiv.net/"},
+        headers={
+            "Referer": "https://www.pixiv.net/",
+            "User-Agent": "PixivIOSApp/7.13.3 (iOS 14.6; iPhone13,2)",
+        },
         timeout=30,
     )
     assert result == b"\xff\xd8\xff"
@@ -225,15 +291,16 @@ def test_get_original_url_single_page():
     client.api.illust_detail.assert_called_once_with(12345)
 
 
-def test_get_original_url_multi_page_uses_first_page():
+def test_get_original_url_multi_page_uses_requested_page():
     client = make_client(token="tok")
     client._logged_in = True
     client.api = MagicMock()
     client.api.illust_detail.return_value.illust.meta_single_page = {}
-    page = MagicMock()
-    page.image_urls.original = "https://i.pximg.net/orig/p0.jpg"
-    client.api.illust_detail.return_value.illust.meta_pages = [page]
+    pages = [MagicMock(), MagicMock()]
+    pages[0].image_urls.original = "https://i.pximg.net/orig/p0.jpg"
+    pages[1].image_urls.original = "https://i.pximg.net/orig/p1.jpg"
+    client.api.illust_detail.return_value.illust.meta_pages = pages
 
-    url = client.get_original_url(99999)
+    url = client.get_original_url(99999, page_index=1)
 
-    assert url == "https://i.pximg.net/orig/p0.jpg"
+    assert url == "https://i.pximg.net/orig/p1.jpg"

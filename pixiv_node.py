@@ -15,6 +15,7 @@ def _get_client():
 class PixivBrowser:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("images",)
+    OUTPUT_IS_LIST = (True,)
     FUNCTION = "execute"
     CATEGORY = "image/pixiv"
     OUTPUT_NODE = False
@@ -48,37 +49,26 @@ class PixivBrowser:
         print(f"[PixivBrowser] Downloading {len(items)} image(s)")
         tensors = []
         errors = []
-        images = []
         for artwork_id, url in items:
             try:
                 if not url:
-                    url = client.get_original_url(int(artwork_id))
+                    detail_id, page_index = artwork_id, 0
+                    if ":p" in artwork_id:
+                        detail_id, page = artwork_id.rsplit(":p", 1)
+                        page_index = int(page)
+                    url = client.get_original_url(int(detail_id), page_index=page_index)
                 raw = client.download_image_bytes(url)
                 img = Image.open(io.BytesIO(raw)).convert("RGB")
-                images.append(img)
+                arr = np.array(img, dtype=np.float32) / 255.0
+                tensors.append(torch.from_numpy(arr).unsqueeze(0))  # [1, H, W, 3]
                 print(f"[PixivBrowser] Downloaded {artwork_id}")
             except Exception as e:
                 msg = f"{artwork_id}: {e}"
                 print(f"[PixivBrowser] Skipping {msg}")
                 errors.append(msg)
 
-        if not images:
+        if not tensors:
             detail = "\n".join(errors[:5])
             raise ValueError(f"所有图片下载失败:\n{detail}")
 
-        raw = []
-        for img in images:
-            arr = np.array(img, dtype=np.float32) / 255.0
-            raw.append(torch.from_numpy(arr))  # [H, W, 3]
-
-        th, tw = raw[0].shape[:2]
-        for t in raw:
-            if t.shape[0] != th or t.shape[1] != tw:
-                t_chw = t.permute(2, 0, 1).unsqueeze(0)
-                t_chw = torch.nn.functional.interpolate(
-                    t_chw, size=(th, tw), mode="bilinear", align_corners=False
-                )
-                t = t_chw.squeeze(0).permute(1, 2, 0)
-            tensors.append(t)
-
-        return (torch.stack(tensors),)
+        return (tensors,)

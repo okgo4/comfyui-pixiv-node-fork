@@ -79,6 +79,16 @@ try:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
+    @routes.get("/pixiv/followed")
+    async def pixiv_followed(request):
+        next_url = request.query.get("next_url")
+        try:
+            return web.json_response(_client_instance.get_followed(next_url=next_url))
+        except RuntimeError as e:
+            return web.json_response({"error": str(e)}, status=401)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
     @routes.get("/pixiv/ranking")
     async def pixiv_ranking(request):
         mode = request.query.get("mode", "day")

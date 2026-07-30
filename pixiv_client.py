@@ -68,6 +68,11 @@ class PixivClient:
         kwargs = self._next_qs(next_url) if next_url else {}
         return self._fmt_illusts(self.api.illust_recommended(**kwargs))
 
+    def get_followed(self, next_url=None):
+        self.ensure_logged_in()
+        kwargs = self._next_qs(next_url) if next_url else {"restrict": "public"}
+        return self._fmt_illusts(self.api.illust_follow(**kwargs))
+
     def get_ranking(self, mode='day', next_url=None):
         self.ensure_logged_in()
         kwargs = self._next_qs(next_url) if next_url else {"mode": mode}
@@ -100,13 +105,37 @@ class PixivClient:
     def _fmt_illusts(self, result):
         illusts = []
         for i in result.illusts:
-            # Extract original URL from browse data to avoid extra illust_detail calls later
             try:
-                orig = (dict(i.meta_single_page) or {}).get("original_image_url") or ""
-                if not orig and i.meta_pages:
-                    orig = i.meta_pages[0].image_urls.original or ""
+                meta_pages = list(i.meta_pages or [])
             except Exception:
-                orig = ""
+                meta_pages = []
+
+            if meta_pages:
+                pages = [
+                    {
+                        "index": index,
+                        "image_urls": {
+                            "medium": page.image_urls.medium,
+                            "large": page.image_urls.large,
+                        },
+                        "original_url": page.image_urls.original or "",
+                    }
+                    for index, page in enumerate(meta_pages)
+                ]
+            else:
+                try:
+                    orig = (dict(i.meta_single_page) or {}).get("original_image_url") or ""
+                except Exception:
+                    orig = ""
+                pages = [{
+                    "index": 0,
+                    "image_urls": {
+                        "medium": i.image_urls.medium,
+                        "large": i.image_urls.large,
+                    },
+                    "original_url": orig,
+                }]
+
             illusts.append({
                 "id": i.id,
                 "title": i.title,
@@ -116,7 +145,9 @@ class PixivClient:
                     "medium": i.image_urls.medium,
                     "large": i.image_urls.large,
                 },
-                "original_url": orig,
+                "original_url": pages[0]["original_url"],
+                "page_count": len(pages),
+                "pages": pages,
                 "is_bookmarked": bool(getattr(i, "is_bookmarked", False)),
                 "user": {
                     "id": i.user.id,
@@ -159,10 +190,17 @@ class PixivClient:
         ]
         return {"artists": artists, "next_url": result.next_url}
 
-    def get_original_url(self, illust_id: int) -> str:
+    def get_original_url(self, illust_id: int, page_index: int = 0) -> str:
         self.ensure_logged_in()
         detail = self.api.illust_detail(illust_id).illust
+        pages = detail.meta_pages or []
+        if pages:
+            if page_index < 0 or page_index >= len(pages):
+                raise IndexError(f"作品 {illust_id} 不存在第 {page_index + 1} 页")
+            return pages[page_index].image_urls.original
+        if page_index != 0:
+            raise IndexError(f"作品 {illust_id} 只有一张图片")
         single = detail.meta_single_page.get("original_image_url")
         if single:
             return single
-        return detail.meta_pages[0].image_urls.original
+        raise ValueError(f"作品 {illust_id} 没有可用的原图地址")

@@ -7,7 +7,7 @@
 
 ## Overview
 
-A ComfyUI custom node that lets users browse Pixiv (recommended works, rankings, bookmarks, artists) inside a popup dialog, select multiple images, and output them as an `IMAGE` batch tensor to downstream nodes.
+A ComfyUI custom node that lets users browse Pixiv (recommended works, rankings, bookmarks, artists) inside a popup dialog, select multiple images, and output them as an `IMAGE` list to downstream nodes.
 
 ---
 
@@ -66,8 +66,8 @@ class PixivBrowser:
 
     def execute(self, artwork_ids):
         # Download selected images via pixiv_client
-        # Convert to torch.Tensor [B, H, W, 3]
-        # Skip failed downloads, output remaining batch
+        # Convert each image to torch.Tensor [1, H, W, 3]
+        # Skip failed downloads, output the remaining image list
 ```
 
 ### `__init__.py`
@@ -163,7 +163,7 @@ Subsequent startups: `pixiv_client.py` reads refresh_token from config.json and 
 |----------|----------|
 | Access token expired | `pixiv_client` auto-refreshes via refresh_token before retrying |
 | Network timeout | API route returns `{error: "timeout"}`, modal shows retry button |
-| Image download fails in execute() | Skip failed IDs, output remaining batch; log warning |
+| Image download fails in execute() | Skip failed IDs, output remaining images; log warning |
 | `artwork_ids` widget empty on execute | Raise `ValueError`: "请先在弹窗中选择图片" |
 | pixivpy3 not installed | `__init__.py` catches ImportError, prints: `pip install pixivpy3` |
 
@@ -173,8 +173,8 @@ Subsequent startups: `pixiv_client.py` reads refresh_token from config.json and 
 
 ```python
 RETURN_TYPES = ("IMAGE",)
-# torch.Tensor shape: [B, H, W, 3], dtype=float32, range [0.0, 1.0]
-# B = number of selected images
+OUTPUT_IS_LIST = (True,)
+# Each torch.Tensor shape: [1, H, W, 3], dtype=float32, range [0.0, 1.0]
 # H, W = original image dimensions (no forced resize)
 ```
 

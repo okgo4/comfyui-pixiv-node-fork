@@ -4,7 +4,7 @@ import { app } from "../../scripts/app.js";
 const illustCache = new Map();
 
 // ── Persistent tab data cache (survives node recreation on workflow switch) ───
-// key: "recommended" | "bookmarks" | "ranking:day" | "ranking:week" | …
+// key: "recommended" | "followed" | "bookmarks" | "ranking:day" | …
 // value: { illusts: IllustObject[], nextUrl: string|null }
 const persistedTabData = new Map();
 
@@ -20,7 +20,8 @@ function injectCSS() {
 
 function esc(str) {
   return String(str)
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 // ── Masonry helpers ───────────────────────────────────────────────────────────
@@ -114,15 +115,21 @@ function attachCustomScrollbar(scrollEl) {
 // ctx = { container, contentEl, idsWidget, S }
 
 function initNodeBrowser(container, idsWidget) {
-  const existingIds = (idsWidget?.value || "")
-    .split(",").map(s => s.trim()).filter(Boolean).map(s => s.split("|")[0]);
+  const existingSelections = (idsWidget?.value || "")
+    .split(",").map(s => s.trim()).filter(Boolean).map(token => {
+      const separator = token.indexOf("|");
+      return separator === -1
+        ? [token, ""]
+        : [token.slice(0, separator), token.slice(separator + 1)];
+    });
 
   const ctx = {
     container,
     idsWidget,
     contentEl: null,
     S: {
-      selectedIds: existingIds,
+      selectedIds: existingSelections.map(([id]) => id),
+      selectedUrls: new Map(existingSelections),
       activeTab: "recommended",
       nextUrls: {},
       loading: false,
@@ -146,6 +153,7 @@ function initNodeBrowser(container, idsWidget) {
   container.innerHTML = `
     <div class="px-tabs">
       <button class="px-tab active" data-tab="recommended">推荐</button>
+      <button class="px-tab" data-tab="followed">新作</button>
       <button class="px-tab" data-tab="ranking">排行榜</button>
       <button class="px-tab" data-tab="bookmarks">收藏</button>
       <button class="px-tab" data-tab="artists">画师</button>
@@ -183,15 +191,13 @@ function initNodeBrowser(container, idsWidget) {
   // Clear all
   container.querySelector(".px-clear-btn").addEventListener("click", () => {
     ctx.S.selectedIds.length = 0;
+    ctx.S.selectedUrls.clear();
     commitSelection(ctx);
     updateCount(ctx);
     if (ctx.S.activeTab === "selected") {
       renderSelectedPane(ctx);
     } else {
-      ctx.contentEl.querySelectorAll(".px-card.selected").forEach(card => {
-        card.classList.remove("selected");
-        card.querySelector(".px-seq-badge")?.remove();
-      });
+      refreshVisibleSelection(ctx);
     }
   });
 
@@ -202,7 +208,7 @@ function initNodeBrowser(container, idsWidget) {
 function commitSelection(ctx) {
   if (!ctx.idsWidget) return;
   ctx.idsWidget.value = ctx.S.selectedIds.map(id => {
-    const url = illustCache.get(id)?.original_url || "";
+    const url = ctx.S.selectedUrls.get(id) || illustCache.get(id)?.original_url || "";
     return url ? `${id}|${url}` : id;
   }).join(",");
 }
@@ -384,19 +390,20 @@ function switchTab(ctx, tabName) {
 
 function renderTabPane(ctx, tabName) {
   if (tabName === "recommended")  renderRecommendedPane(ctx);
+  else if (tabName === "followed") renderFollowedPane(ctx);
   else if (tabName === "ranking") renderRankingPane(ctx);
   else if (tabName === "bookmarks") renderBookmarksPane(ctx);
   else if (tabName === "artists") renderArtistPane(ctx);
   else if (tabName === "search")  renderSearchPane(ctx);
 }
 
-// ── Recommended pane (cached) ─────────────────────────────────────────────────
-function renderRecommendedPane(ctx) {
+// ── Standard image panes (cached) ─────────────────────────────────────────────
+function renderImagePane(ctx, tab, title) {
   const { contentEl, S } = ctx;
   contentEl.innerHTML = `
     <div class="px-recommended-pane">
       <div class="px-rank-bar">
-        <span style="flex:1;color:#7f849c;font-size:11px">为你推荐</span>
+        <span style="flex:1;color:#7f849c;font-size:11px">${title}</span>
         <button class="px-refresh-btn">↻ 刷新</button>
       </div>
       <div class="px-rank-grid-wrap">
@@ -408,59 +415,29 @@ function renderRecommendedPane(ctx) {
     </div>
   `;
   contentEl.querySelector(".px-refresh-btn").addEventListener("click", () => {
-    persistedTabData.delete("recommended");
-    delete S.cachedPanes["recommended"];
-    S.nextUrls["recommended"] = undefined;
-    renderRecommendedPane(ctx);
+    persistedTabData.delete(tab);
+    delete S.cachedPanes[tab];
+    S.nextUrls[tab] = undefined;
+    renderImagePane(ctx, tab, title);
   });
-  S.masonryCols["recommended"] = setupMasonry(contentEl.querySelector(".px-grid"));
-  const recCached = persistedTabData.get("recommended");
-  if (recCached?.illusts.length) {
-    S.nextUrls["recommended"] = recCached.nextUrl;
-    for (const illust of recCached.illusts) masonryAdd(S.masonryCols["recommended"], createCard(ctx, illust));
+  S.masonryCols[tab] = setupMasonry(contentEl.querySelector(".px-grid"));
+  const cached = persistedTabData.get(tab);
+  if (cached?.illusts.length) {
+    S.nextUrls[tab] = cached.nextUrl;
+    for (const illust of cached.illusts) {
+      masonryAdd(S.masonryCols[tab], createCard(ctx, illust));
+    }
   } else {
-    S.nextUrls["recommended"] = undefined;
-    loadMoreImages(ctx, "recommended");
+    S.nextUrls[tab] = undefined;
+    loadMoreImages(ctx, tab);
   }
-  setupInfiniteScroll(ctx, "recommended");
+  setupInfiniteScroll(ctx, tab);
   attachCustomScrollbar(contentEl.querySelector(".px-grid-pane"));
 }
 
-// ── Bookmarks pane ────────────────────────────────────────────────────────────
-function renderBookmarksPane(ctx) {
-  const { contentEl, S } = ctx;
-  contentEl.innerHTML = `
-    <div class="px-recommended-pane">
-      <div class="px-rank-bar">
-        <span style="flex:1;color:#7f849c;font-size:11px">我的收藏</span>
-        <button class="px-refresh-btn">↻ 刷新</button>
-      </div>
-      <div class="px-rank-grid-wrap">
-        <div class="px-grid-pane">
-          <div class="px-grid"></div>
-          <div class="px-loading" style="display:none">加载中...</div>
-        </div>
-      </div>
-    </div>
-  `;
-  contentEl.querySelector(".px-refresh-btn").addEventListener("click", () => {
-    persistedTabData.delete("bookmarks");
-    delete S.cachedPanes["bookmarks"];
-    S.nextUrls["bookmarks"] = undefined;
-    renderBookmarksPane(ctx);
-  });
-  S.masonryCols["bookmarks"] = setupMasonry(contentEl.querySelector(".px-grid"));
-  const bmCached = persistedTabData.get("bookmarks");
-  if (bmCached?.illusts.length) {
-    S.nextUrls["bookmarks"] = bmCached.nextUrl;
-    for (const illust of bmCached.illusts) masonryAdd(S.masonryCols["bookmarks"], createCard(ctx, illust));
-  } else {
-    S.nextUrls["bookmarks"] = undefined;
-    loadMoreImages(ctx, "bookmarks");
-  }
-  setupInfiniteScroll(ctx, "bookmarks");
-  attachCustomScrollbar(contentEl.querySelector(".px-grid-pane"));
-}
+function renderRecommendedPane(ctx) { renderImagePane(ctx, "recommended", "为你推荐"); }
+function renderFollowedPane(ctx) { renderImagePane(ctx, "followed", "关注画师的新作"); }
+function renderBookmarksPane(ctx) { renderImagePane(ctx, "bookmarks", "我的收藏"); }
 
 // ── Ranking pane ──────────────────────────────────────────────────────────────
 const RANKING_MODES = [
@@ -531,6 +508,7 @@ async function fetchImages(tab, nextUrl, S) {
   const q  = nextUrl ? `?next_url=${encodeURIComponent(nextUrl)}` : "";
   const urls = {
     recommended: `/pixiv/recommended${q}`,
+    followed:    `/pixiv/followed${q}`,
     ranking:     `/pixiv/ranking?mode=${encodeURIComponent(S?.rankingMode || "day")}${np}`,
     bookmarks:   `/pixiv/bookmarks${q}`,
   };
@@ -595,21 +573,166 @@ function setupInfiniteScroll(ctx, tab) {
   }, { passive: true });
 }
 
+// ── Multi-page artwork picker ─────────────────────────────────────────────────
+function pageSelectionId(illustId, pageIndex) {
+  return `${illustId}:p${pageIndex}`;
+}
+
+function cachePageIllust(illust, page) {
+  const id = pageSelectionId(illust.id, page.index);
+  illustCache.set(id, {
+    ...illust,
+    id,
+    title: `${illust.title} · P${page.index + 1}`,
+    image_urls: page.image_urls,
+    original_url: page.original_url || "",
+    page_count: 1,
+    pages: [page],
+  });
+  return id;
+}
+
+function syncPostCard(ctx, card, illust) {
+  const pageIds = illust.pages.map(page => cachePageIllust(illust, page));
+  let selectedCount = pageIds.filter(id => ctx.S.selectedIds.includes(id)).length;
+  if (ctx.S.selectedIds.includes(String(illust.id))) selectedCount = Math.max(1, selectedCount);
+  card.classList.toggle("selected", selectedCount > 0);
+  const badge = card.querySelector(".px-page-count-badge");
+  if (badge) {
+    badge.textContent = selectedCount ? `${selectedCount}/${pageIds.length}` : `${pageIds.length}P`;
+    badge.classList.toggle("selected", selectedCount > 0);
+  }
+}
+
+function refreshVisibleSelection(ctx) {
+  ctx.contentEl.querySelectorAll(".px-card[data-id]").forEach(card => {
+    const id = card.dataset.id;
+    const illust = illustCache.get(id);
+    card.querySelector(".px-seq-badge")?.remove();
+    if (illust?.pages?.length > 1) {
+      syncPostCard(ctx, card, illust);
+      return;
+    }
+    const index = ctx.S.selectedIds.indexOf(id);
+    card.classList.toggle("selected", index !== -1);
+    if (index !== -1 && !card.querySelector(".px-remove-btn")) {
+      card.insertAdjacentHTML("beforeend", `<div class="px-seq-badge">${index + 1}</div>`);
+    }
+  });
+}
+
+function openPagePicker(ctx, illust) {
+  document.querySelector(".px-page-dialog")?.close();
+
+  const pages = illust.pages;
+  const pageIds = pages.map(page => cachePageIllust(illust, page));
+  const draft = new Set(pageIds.filter(id => ctx.S.selectedIds.includes(id)));
+  if (ctx.S.selectedIds.includes(String(illust.id))) draft.add(pageIds[0]);
+
+  const dialog = document.createElement("dialog");
+  dialog.className = "px-page-dialog";
+  dialog.innerHTML = `
+    <div class="px-page-dialog-header">
+      <strong>${esc(illust.title)}</strong>
+      <span>共 ${pages.length} 张</span>
+    </div>
+    <div class="px-page-grid"></div>
+    <div class="px-page-dialog-footer">
+      <span class="px-page-selected-count"></span>
+      <button class="px-page-select-all">全选</button>
+      <button class="px-page-clear">清空</button>
+      <button class="px-page-cancel">取消</button>
+      <button class="px-page-confirm">使用所选图片</button>
+    </div>
+  `;
+
+  const grid = dialog.querySelector(".px-page-grid");
+  pages.forEach((page, index) => {
+    const option = document.createElement("button");
+    option.className = "px-page-option";
+    option.type = "button";
+    option.dataset.pageId = pageIds[index];
+    const thumb = `/pixiv/image_proxy?url=${encodeURIComponent(page.image_urls.medium)}`;
+    option.innerHTML = `
+      <img src="${thumb}" alt="${esc(illust.title)} P${index + 1}" loading="lazy" />
+      <span>P${index + 1}</span>
+    `;
+    option.addEventListener("click", () => {
+      if (draft.has(pageIds[index])) draft.delete(pageIds[index]);
+      else draft.add(pageIds[index]);
+      updateDraft();
+    });
+    grid.appendChild(option);
+  });
+
+  const updateDraft = () => {
+    dialog.querySelectorAll(".px-page-option").forEach(option => {
+      option.classList.toggle("selected", draft.has(option.dataset.pageId));
+    });
+    dialog.querySelector(".px-page-selected-count").textContent = `已选 ${draft.size} 张`;
+  };
+
+  dialog.querySelector(".px-page-select-all").addEventListener("click", () => {
+    pageIds.forEach(id => draft.add(id));
+    updateDraft();
+  });
+  dialog.querySelector(".px-page-clear").addEventListener("click", () => {
+    draft.clear();
+    updateDraft();
+  });
+  dialog.querySelector(".px-page-cancel").addEventListener("click", () => dialog.close());
+  dialog.querySelector(".px-page-confirm").addEventListener("click", () => {
+    const postId = String(illust.id);
+    const allPageIds = new Set(pageIds);
+    if (!ctx.S.multiSelect) {
+      ctx.S.selectedIds.length = 0;
+      ctx.S.selectedUrls.clear();
+    } else {
+      for (let i = ctx.S.selectedIds.length - 1; i >= 0; i--) {
+        const id = ctx.S.selectedIds[i];
+        if (id === postId || allPageIds.has(id)) {
+          ctx.S.selectedIds.splice(i, 1);
+          ctx.S.selectedUrls.delete(id);
+        }
+      }
+    }
+    pages.forEach((page, index) => {
+      const id = pageIds[index];
+      if (!draft.has(id)) return;
+      ctx.S.selectedIds.push(id);
+      ctx.S.selectedUrls.set(id, page.original_url || "");
+    });
+    commitSelection(ctx);
+    updateCount(ctx);
+    refreshVisibleSelection(ctx);
+    dialog.close();
+  });
+
+  dialog.addEventListener("click", event => {
+    if (event.target === dialog) dialog.close();
+  });
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.appendChild(dialog);
+  updateDraft();
+  dialog.showModal();
+}
+
 // ── Cards ─────────────────────────────────────────────────────────────────────
 function createCard(ctx, illust) {
   illustCache.set(String(illust.id), illust);
   const id = String(illust.id);
   const { S } = ctx;
+  const isMultiPage = illust.pages?.length > 1;
 
   const card = document.createElement("div");
   card.className = "px-card";
   card.dataset.id = id;
 
   const thumb = `/pixiv/image_proxy?url=${encodeURIComponent(illust.image_urls.medium)}`;
-  const ratio = (illust.width && illust.height) ? `aspect-ratio:${illust.width}/${illust.height};` : "";
   card.innerHTML = `
-    <img src="${thumb}" alt="${esc(illust.title)}" loading="lazy" style="${ratio}width:100%;height:auto;display:block" />
+    <img src="${thumb}" alt="${esc(illust.title)}" loading="lazy" />
     <div class="px-card-title">${esc(illust.title)}</div>
+    ${isMultiPage ? `<div class="px-page-count-badge">${illust.pages.length}P</div>` : ""}
   `;
 
   // Bookmark button (toggle)
@@ -663,13 +786,20 @@ function createCard(ctx, illust) {
   });
   card.appendChild(pixivBtn);
 
-  const idx = S.selectedIds.indexOf(id);
-  if (idx !== -1) {
-    card.classList.add("selected");
-    card.insertAdjacentHTML("beforeend", `<div class="px-seq-badge">${idx + 1}</div>`);
+  if (isMultiPage) {
+    syncPostCard(ctx, card, illust);
+  } else {
+    const idx = S.selectedIds.indexOf(id);
+    if (idx !== -1) {
+      card.classList.add("selected");
+      card.insertAdjacentHTML("beforeend", `<div class="px-seq-badge">${idx + 1}</div>`);
+    }
   }
 
-  card.addEventListener("click", () => toggleCard(ctx, card, id));
+  card.addEventListener("click", () => {
+    if (isMultiPage) openPagePicker(ctx, illust);
+    else toggleCard(ctx, card, id);
+  });
   return card;
 }
 
@@ -683,8 +813,10 @@ function toggleCard(ctx, card, id) {
       c.querySelector(".px-seq-badge")?.remove();
     });
     S.selectedIds.length = 0;
+    S.selectedUrls.clear();
     if (!wasSelected) {
       S.selectedIds.push(id);
+      S.selectedUrls.set(id, illustCache.get(id)?.original_url || "");
       card.classList.add("selected");
       card.insertAdjacentHTML("beforeend", `<div class="px-seq-badge">1</div>`);
     }
@@ -692,11 +824,13 @@ function toggleCard(ctx, card, id) {
     const idx = S.selectedIds.indexOf(id);
     if (idx === -1) {
       S.selectedIds.push(id);
+      S.selectedUrls.set(id, illustCache.get(id)?.original_url || "");
       card.classList.add("selected");
       card.insertAdjacentHTML("beforeend",
         `<div class="px-seq-badge">${S.selectedIds.length}</div>`);
     } else {
       S.selectedIds.splice(idx, 1);
+      S.selectedUrls.delete(id);
       card.classList.remove("selected");
       card.querySelector(".px-seq-badge")?.remove();
       rebadgeAll(ctx);
@@ -737,9 +871,8 @@ function renderSelectedPane(ctx) {
 
     if (illust) {
       const thumb = `/pixiv/image_proxy?url=${encodeURIComponent(illust.image_urls.medium)}`;
-      const ratio = (illust.width && illust.height) ? `aspect-ratio:${illust.width}/${illust.height};` : "";
       card.innerHTML = `
-        <img src="${thumb}" alt="${esc(illust.title)}" loading="lazy" style="${ratio}width:100%;height:auto;display:block" />
+        <img src="${thumb}" alt="${esc(illust.title)}" loading="lazy" />
         <div class="px-card-title">${esc(illust.title)}</div>
         <div class="px-seq-badge">${S.selectedIds.indexOf(id) + 1}</div>
         <button class="px-remove-btn" title="取消选择">✕</button>
@@ -756,6 +889,7 @@ function renderSelectedPane(ctx) {
       const i = S.selectedIds.indexOf(id);
       if (i !== -1) {
         S.selectedIds.splice(i, 1);
+        S.selectedUrls.delete(id);
         updateCount(ctx);
         commitSelection(ctx);
         renderSelectedPane(ctx);
