@@ -230,6 +230,22 @@ def test_get_bookmarked_artists_returns_formatted():
     assert result["artists"][0]["name"] == "Artist1"
 
 
+def test_get_bookmarked_artists_uses_next_page_query():
+    client = make_client(token="tok")
+    client._logged_in = True
+    client.api = MagicMock()
+    client.api.user_following.return_value = MagicMock(
+        user_previews=[], next_url=None
+    )
+    client._next_qs = MagicMock(return_value={"user_id": "42", "offset": "30"})
+
+    next_url = "https://example.test/?user_id=42&offset=30"
+    client.get_bookmarked_artists(next_url)
+
+    client._next_qs.assert_called_once_with(next_url)
+    client.api.user_following.assert_called_once_with(user_id="42", offset="30")
+
+
 def test_search_users_uses_shared_artist_format():
     client = make_client(token="tok")
     client._logged_in = True

@@ -135,6 +135,9 @@ function initNodeBrowser(container, idsWidget) {
       loading: false,
       activeArtistId: null,
       artistNextUrl: null,
+      artistListNextUrl: null,
+      artistListLoading: false,
+      artistListVersion: 0,
       rankingMode: "day",
       cachedPanes: {},
       pendingArtistId: null,
@@ -911,6 +914,9 @@ async function renderArtistPane(ctx) {
   const { contentEl, S } = ctx;
   const pending = S.pendingArtistId;
   S.pendingArtistId = null;
+  const version = ++S.artistListVersion;
+  S.artistListNextUrl = undefined;
+  S.artistListLoading = false;
 
   contentEl.innerHTML = `
     <div class="px-artist-container">
@@ -919,7 +925,7 @@ async function renderArtistPane(ctx) {
         <button class="px-refresh-btn">↻ 刷新</button>
       </div>
       <div class="px-artist-pane">
-        <div class="px-artist-list"><div class="px-loading">加载中...</div></div>
+        <div class="px-artist-list"></div>
         <div class="px-artist-works-pane">
           <div class="px-artist-works-placeholder">请从左侧选择画师</div>
         </div>
@@ -931,23 +937,15 @@ async function renderArtistPane(ctx) {
     S.activeArtistId = null;
     renderArtistPane(ctx);
   });
-  try {
-    const resp = await fetch("/pixiv/bookmarked_artists");
-    if (!resp.ok) {
-      const body = await resp.json().catch(() => ({}));
-      throw new Error(body.error || `HTTP ${resp.status}`);
-    }
-    const data = await resp.json();
-    renderArtistList(ctx, data.artists, contentEl.querySelector(".px-artist-list"));
-    if (pending) loadArtistWorks(ctx, pending.id, pending);
-  } catch (e) {
-    contentEl.querySelector(".px-artist-list").innerHTML =
-      `<div class="px-error">加载失败: ${esc(e.message)}</div>`;
+  const listEl = contentEl.querySelector(".px-artist-list");
+  setupArtistListInfiniteScroll(ctx, listEl, version);
+  await loadMoreArtists(ctx, listEl, version);
+  if (pending && version === S.artistListVersion && S.activeTab === "artists") {
+    loadArtistWorks(ctx, pending.id, pending);
   }
 }
 
 function renderArtistList(ctx, artists, listEl) {
-  listEl.innerHTML = "";
   for (const artist of artists) {
     const item   = document.createElement("div");
     item.className = "px-artist-item";
@@ -963,6 +961,60 @@ function renderArtistList(ctx, artists, listEl) {
     });
     listEl.appendChild(item);
   }
+}
+
+async function loadMoreArtists(ctx, listEl, version) {
+  const { S } = ctx;
+  if (version !== S.artistListVersion || S.artistListLoading) return;
+  const nextUrl = S.artistListNextUrl;
+  if (nextUrl === null) return;
+
+  S.artistListLoading = true;
+  const loadEl = document.createElement("div");
+  loadEl.className = "px-loading";
+  loadEl.textContent = "加载中...";
+  listEl.appendChild(loadEl);
+  let fillViewport = false;
+
+  try {
+    const params = nextUrl ? `?next_url=${encodeURIComponent(nextUrl)}` : "";
+    const resp = await fetch(`/pixiv/bookmarked_artists${params}`);
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body.error || `HTTP ${resp.status}`);
+    }
+    const data = await resp.json();
+    if (version !== S.artistListVersion) return;
+
+    loadEl.remove();
+    renderArtistList(ctx, data.artists, listEl);
+    S.artistListNextUrl = data.next_url ?? null;
+    fillViewport = listEl.isConnected && S.activeTab === "artists"
+      && listEl.scrollHeight <= listEl.clientHeight + 20
+      && S.artistListNextUrl !== null;
+  } catch (e) {
+    if (version === S.artistListVersion) {
+      loadEl.className = "px-error";
+      loadEl.textContent = `加载失败: ${e.message}`;
+    }
+  } finally {
+    if (version === S.artistListVersion) {
+      S.artistListLoading = false;
+      if (fillViewport) {
+        setTimeout(() => loadMoreArtists(ctx, listEl, version), 0);
+      }
+    } else {
+      loadEl.remove();
+    }
+  }
+}
+
+function setupArtistListInfiniteScroll(ctx, listEl, version) {
+  listEl.addEventListener("scroll", () => {
+    if (listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 120) {
+      loadMoreArtists(ctx, listEl, version);
+    }
+  }, { passive: true });
 }
 
 async function loadArtistWorks(ctx, artistId, artistInfo = null) {
