@@ -105,8 +105,15 @@ try:
 
     @routes.get("/pixiv/bookmarks")
     async def pixiv_bookmarks(request):
+        restrict = request.query.get("restrict", "public")
+        if restrict not in {"public", "private"}:
+            return web.json_response({"error": "invalid restrict"}, status=400)
         next_url = request.query.get("next_url")
-        return await _api_response(_client_instance.get_bookmarks, next_url=next_url)
+        return await _api_response(
+            _client_instance.get_bookmarks,
+            next_url=next_url,
+            restrict=restrict,
+        )
 
     @routes.get("/pixiv/bookmarked_artists")
     async def pixiv_bookmarked_artists(request):

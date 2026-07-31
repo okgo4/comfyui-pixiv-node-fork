@@ -199,7 +199,7 @@ def test_get_ranking_passes_mode():
     client.api.illust_ranking.assert_called_once_with(mode="week")
 
 
-def test_get_bookmarks_uses_user_id():
+def test_get_bookmarks_defaults_to_public():
     client = make_client(token="tok")
     client._logged_in = True
     client.api = MagicMock()
@@ -208,7 +208,23 @@ def test_get_bookmarks_uses_user_id():
 
     client.get_bookmarks()
 
-    client.api.user_bookmarks_illust.assert_called_once_with(user_id="42")
+    client.api.user_bookmarks_illust.assert_called_once_with(
+        user_id="42", restrict="public"
+    )
+
+
+def test_get_bookmarks_supports_private():
+    client = make_client(token="tok")
+    client._logged_in = True
+    client.api = MagicMock()
+    client.api.user_id = "42"
+    client.api.user_bookmarks_illust.return_value = _mock_result()
+
+    client.get_bookmarks(restrict="private")
+
+    client.api.user_bookmarks_illust.assert_called_once_with(
+        user_id="42", restrict="private"
+    )
 
 
 def test_get_bookmarked_artists_returns_formatted():

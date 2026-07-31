@@ -93,9 +93,12 @@ class PixivClient:
         kwargs = self._next_qs(next_url) if next_url else {"mode": mode}
         return self._fmt_illusts(self.api.illust_ranking(**kwargs))
 
-    def get_bookmarks(self, next_url=None):
+    def get_bookmarks(self, next_url=None, restrict="public"):
         self.ensure_logged_in()
-        kwargs = self._next_qs(next_url) if next_url else {"user_id": self.api.user_id}
+        kwargs = self._next_qs(next_url) if next_url else {
+            "user_id": self.api.user_id,
+            "restrict": restrict,
+        }
         return self._fmt_illusts(self.api.user_bookmarks_illust(**kwargs))
 
     def get_bookmarked_artists(self, next_url=None):

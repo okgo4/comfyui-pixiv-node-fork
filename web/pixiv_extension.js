@@ -4,7 +4,7 @@ import { app } from "../../scripts/app.js";
 const illustCache = new Map();
 
 // ── Persistent tab data cache (survives node recreation on workflow switch) ───
-// key: "recommended" | "followed" | "bookmarks" | "ranking:day" | …
+// key: "recommended" | "followed" | "bookmarks:public" | "ranking:day" | …
 // value: { illusts: IllustObject[], nextUrl: string|null }
 const persistedTabData = new Map();
 
@@ -135,6 +135,8 @@ function initNodeBrowser(container, idsWidget) {
       loading: false,
       activeArtistId: null,
       artistNextUrl: null,
+      bookmarkRestrict: "public",
+      imageLoading: new Set(),
       artistListNextUrl: null,
       artistListLoading: false,
       artistListVersion: 0,
@@ -401,11 +403,19 @@ function renderTabPane(ctx, tabName) {
 }
 
 // ── Standard image panes (cached) ─────────────────────────────────────────────
-function renderImagePane(ctx, tab, title) {
+function imageCacheKey(tab, S) {
+  if (tab === "ranking") return `ranking:${S.rankingMode}`;
+  if (tab === "bookmarks") return `bookmarks:${S.bookmarkRestrict}`;
+  return tab;
+}
+
+function renderImagePane(ctx, tab, title, controls = "") {
   const { contentEl, S } = ctx;
+  const cacheKey = imageCacheKey(tab, S);
   contentEl.innerHTML = `
     <div class="px-recommended-pane">
       <div class="px-rank-bar">
+        ${controls}
         <span style="flex:1;color:#7f849c;font-size:11px">${title}</span>
         <button class="px-refresh-btn">↻ 刷新</button>
       </div>
@@ -418,13 +428,13 @@ function renderImagePane(ctx, tab, title) {
     </div>
   `;
   contentEl.querySelector(".px-refresh-btn").addEventListener("click", () => {
-    persistedTabData.delete(tab);
+    persistedTabData.delete(cacheKey);
     delete S.cachedPanes[tab];
     S.nextUrls[tab] = undefined;
-    renderImagePane(ctx, tab, title);
+    renderTabPane(ctx, tab);
   });
   S.masonryCols[tab] = setupMasonry(contentEl.querySelector(".px-grid"));
-  const cached = persistedTabData.get(tab);
+  const cached = persistedTabData.get(cacheKey);
   if (cached?.illusts.length) {
     S.nextUrls[tab] = cached.nextUrl;
     for (const illust of cached.illusts) {
@@ -440,7 +450,25 @@ function renderImagePane(ctx, tab, title) {
 
 function renderRecommendedPane(ctx) { renderImagePane(ctx, "recommended", "为你推荐"); }
 function renderFollowedPane(ctx) { renderImagePane(ctx, "followed", "关注画师的新作"); }
-function renderBookmarksPane(ctx) { renderImagePane(ctx, "bookmarks", "我的收藏"); }
+function renderBookmarksPane(ctx) {
+  const { contentEl, S } = ctx;
+  const controls = [
+    ["public", "公开"],
+    ["private", "私人"],
+  ].map(([id, label]) =>
+    `<button class="px-rank-btn${S.bookmarkRestrict === id ? " active" : ""}" data-restrict="${id}">${label}</button>`
+  ).join("");
+  renderImagePane(ctx, "bookmarks", "我的收藏", controls);
+  contentEl.querySelectorAll("[data-restrict]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (S.bookmarkRestrict === btn.dataset.restrict) return;
+      S.bookmarkRestrict = btn.dataset.restrict;
+      delete S.cachedPanes.bookmarks;
+      S.nextUrls.bookmarks = undefined;
+      renderBookmarksPane(ctx);
+    });
+  });
+}
 
 // ── Ranking pane ──────────────────────────────────────────────────────────────
 const RANKING_MODES = [
@@ -513,7 +541,7 @@ async function fetchImages(tab, nextUrl, S) {
     recommended: `/pixiv/recommended${q}`,
     followed:    `/pixiv/followed${q}`,
     ranking:     `/pixiv/ranking?mode=${encodeURIComponent(S?.rankingMode || "day")}${np}`,
-    bookmarks:   `/pixiv/bookmarks${q}`,
+    bookmarks:   `/pixiv/bookmarks?restrict=${encodeURIComponent(S?.bookmarkRestrict || "public")}${np}`,
   };
   const resp = await fetch(urls[tab]);
   if (!resp.ok) {
@@ -525,23 +553,23 @@ async function fetchImages(tab, nextUrl, S) {
 
 async function loadMoreImages(ctx, tab) {
   const { contentEl, S } = ctx;
-  if (S.loading) return;
   if (S.activeTab !== tab) return;
+  const cacheKey = imageCacheKey(tab, S);
+  if (S.imageLoading.has(cacheKey)) return;
   const nextUrl = S.nextUrls[tab];
   if (nextUrl === null) return;
 
-  S.loading = true;
+  S.imageLoading.add(cacheKey);
   const pane   = contentEl.querySelector(".px-grid-pane");
   const loadEl = contentEl.querySelector(".px-loading");
   if (loadEl) loadEl.style.display = "flex";
 
   try {
     const data = await fetchImages(tab, nextUrl, S);
-    if (S.activeTab !== tab) return;
+    if (S.activeTab !== tab || imageCacheKey(tab, S) !== cacheKey) return;
     S.nextUrls[tab] = data.next_url ?? null;
 
     // Persist first page only — keeps restoration cost low (~30 cards)
-    const cacheKey = tab === "ranking" ? `ranking:${S.rankingMode}` : tab;
     if (!persistedTabData.has(cacheKey)) {
       persistedTabData.set(cacheKey, { illusts: data.illusts, nextUrl: S.nextUrls[tab] });
     }
@@ -560,7 +588,7 @@ async function loadMoreImages(ctx, tab) {
     pane?.insertAdjacentHTML("beforeend",
       `<div class="px-error">加载失败: ${esc(e.message)}</div>`);
   } finally {
-    S.loading = false;
+    S.imageLoading.delete(cacheKey);
     if (loadEl) loadEl.style.display = "none";
   }
 }
