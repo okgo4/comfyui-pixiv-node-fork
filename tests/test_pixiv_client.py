@@ -2,12 +2,13 @@ import re
 import time
 import pytest
 from unittest.mock import MagicMock, patch
-from pixiv_client import PixivClient, is_pximg_url
+from pixiv_client import PixivClient, WebSessionError, is_pximg_url
 
 
-def make_client(token=None):
+def make_client(token=None, web_session=None):
     mock_config = MagicMock()
     mock_config.get_refresh_token.return_value = token
+    mock_config.get_web_session.return_value = web_session
     return PixivClient(mock_config)
 
 
@@ -142,6 +143,149 @@ def test_get_recommended_returns_formatted_illusts():
     assert result["illusts"][0]["title"] == "Test Art"
     assert result["illusts"][0]["user"]["name"] == "TestArtist"
     assert result["next_url"] is None
+
+
+def test_get_recommended_filters_safe_rating():
+    client = make_client(token="tok")
+    client._logged_in = True
+    safe = _mock_illust()
+    safe.id = 1
+    safe.x_restrict = 0
+    r18 = _mock_illust()
+    r18.id = 2
+    r18.x_restrict = 1
+    client.api = MagicMock()
+    client.api.illust_recommended.return_value = _mock_result([safe, r18])
+
+    result = client.get_recommended(rating="safe")
+
+    assert [illust["id"] for illust in result["illusts"]] == [1]
+
+
+def _discovery_item(page_count=1):
+    return {
+        "id": "12345",
+        "title": "Discovery Art",
+        "userId": "999",
+        "userName": "DiscoveryArtist",
+        "profileImageUrl": "https://i.pximg.net/avatar.jpg",
+        "url": "https://i.pximg.net/thumb.jpg",
+        "pageCount": page_count,
+        "bookmarkData": {"id": "1", "private": False},
+    }
+
+
+def _discovery_response(items=None):
+    response = MagicMock()
+    response.json.return_value = {
+        "error": False,
+        "body": {"thumbnails": {"illust": items or []}},
+    }
+    return response
+
+
+def test_get_recommended_uses_r18_discovery():
+    client = make_client(token="tok", web_session="web-session")
+    client._logged_in = True
+    client.api = MagicMock()
+    client.http = MagicMock()
+    client.http.get.return_value = _discovery_response([_discovery_item(3)])
+
+    result = client.get_recommended(rating="r18")
+
+    client.api.illust_ranking.assert_not_called()
+    client.http.get.assert_called_once_with(
+        "https://www.pixiv.net/ajax/discovery/artworks",
+        params={"mode": "r18", "limit": 60},
+        cookies={"PHPSESSID": "web-session"},
+        headers={
+            "Accept": "application/json",
+            "Referer": "https://www.pixiv.net/discovery?mode=r18",
+            "User-Agent": "Mozilla/5.0",
+        },
+        timeout=30,
+    )
+    assert result["illusts"][0]["id"] == 12345
+    assert result["illusts"][0]["page_count"] == 3
+    assert result["illusts"][0]["is_bookmarked"] is True
+    assert result["illusts"][0]["original_url"] == ""
+    assert result["next_url"] == "discovery"
+
+
+def test_get_recommended_uses_web_discovery_after_session_is_configured():
+    client = make_client(token="tok", web_session="web-session")
+    client._logged_in = True
+    client._auth_time = time.time()
+    client.api = MagicMock()
+    client.http = MagicMock()
+    client.http.get.return_value = _discovery_response([_discovery_item()])
+
+    client.get_recommended(rating="all")
+
+    assert client.http.get.call_args.kwargs["params"]["mode"] == "all"
+
+
+def test_empty_discovery_stops_scrolling():
+    client = make_client(token="tok", web_session="web-session")
+    client._logged_in = True
+    client.api = MagicMock()
+    client.http = MagicMock()
+    client.http.get.return_value = _discovery_response()
+
+    result = client.get_recommended(rating="r18")
+
+    assert result == {"illusts": [], "next_url": None}
+
+
+def test_get_recommended_r18_requires_web_session():
+    client = make_client(token="tok")
+    client._logged_in = True
+    client.api = MagicMock()
+
+    with pytest.raises(WebSessionError, match="PHPSESSID"):
+        client.get_recommended(rating="r18")
+
+
+def test_set_web_session_validates_before_saving():
+    client = make_client(token="tok")
+    client.http = MagicMock()
+    client.http.get.return_value = _discovery_response()
+
+    client.set_web_session("new-session")
+
+    assert client.http.get.call_args.kwargs["params"]["mode"] == "safe"
+    client.config.save_web_session.assert_called_once_with("new-session")
+
+
+def test_get_recommended_handles_null_app_response():
+    client = make_client(token="tok")
+    client._logged_in = True
+    client.api = MagicMock()
+    result = _mock_result(next_url="next")
+    result.illusts = None
+    client.api.illust_recommended.return_value = result
+
+    formatted = client.get_recommended()
+
+    assert formatted == {"illusts": [], "next_url": "next"}
+
+
+def test_get_illust_returns_full_pages():
+    client = make_client(token="tok")
+    client._logged_in = True
+    detail = _mock_illust()
+    page = MagicMock()
+    page.image_urls.medium = "https://i.pximg.net/p0-medium.jpg"
+    page.image_urls.large = "https://i.pximg.net/p0-large.jpg"
+    page.image_urls.original = "https://i.pximg.net/p0-original.jpg"
+    detail.meta_pages = [page]
+    client.api = MagicMock()
+    client.api.illust_detail.return_value.illust = detail
+
+    result = client.get_illust(12345)
+
+    client.api.illust_detail.assert_called_once_with(12345)
+    assert result["pages"][0]["original_url"].endswith("p0-original.jpg")
 
 
 def test_get_followed_returns_formatted_illusts():

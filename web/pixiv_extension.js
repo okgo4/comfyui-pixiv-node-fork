@@ -4,7 +4,7 @@ import { app } from "../../scripts/app.js";
 const illustCache = new Map();
 
 // ── Persistent tab data cache (survives node recreation on workflow switch) ───
-// key: "recommended" | "followed" | "bookmarks:public" | "ranking:day" | …
+// key: "recommended:all" | "followed" | "bookmarks:public" | "ranking:day" | …
 // value: { illusts: IllustObject[], nextUrl: string|null }
 const persistedTabData = new Map();
 
@@ -135,6 +135,7 @@ function initNodeBrowser(container, idsWidget) {
       loading: false,
       activeArtistId: null,
       artistNextUrl: null,
+      recommendRating: "all",
       bookmarkRestrict: "public",
       imageLoading: new Set(),
       artistListNextUrl: null,
@@ -404,6 +405,7 @@ function renderTabPane(ctx, tabName) {
 
 // ── Standard image panes (cached) ─────────────────────────────────────────────
 function imageCacheKey(tab, S) {
+  if (tab === "recommended") return `recommended:${S.recommendRating}`;
   if (tab === "ranking") return `ranking:${S.rankingMode}`;
   if (tab === "bookmarks") return `bookmarks:${S.bookmarkRestrict}`;
   return tab;
@@ -448,26 +450,33 @@ function renderImagePane(ctx, tab, title, controls = "") {
   attachCustomScrollbar(contentEl.querySelector(".px-grid-pane"));
 }
 
-function renderRecommendedPane(ctx) { renderImagePane(ctx, "recommended", "为你推荐"); }
-function renderFollowedPane(ctx) { renderImagePane(ctx, "followed", "关注画师的新作"); }
-function renderBookmarksPane(ctx) {
+function renderFilteredImagePane(ctx, tab, title, stateKey, choices) {
   const { contentEl, S } = ctx;
-  const controls = [
-    ["public", "公开"],
-    ["private", "私人"],
-  ].map(([id, label]) =>
-    `<button class="px-rank-btn${S.bookmarkRestrict === id ? " active" : ""}" data-restrict="${id}">${label}</button>`
+  const controls = choices.map(([id, label]) =>
+    `<button class="px-rank-btn${S[stateKey] === id ? " active" : ""}" data-filter="${id}">${label}</button>`
   ).join("");
-  renderImagePane(ctx, "bookmarks", "我的收藏", controls);
-  contentEl.querySelectorAll("[data-restrict]").forEach(btn => {
+  renderImagePane(ctx, tab, title, controls);
+  contentEl.querySelectorAll("[data-filter]").forEach(btn => {
     btn.addEventListener("click", () => {
-      if (S.bookmarkRestrict === btn.dataset.restrict) return;
-      S.bookmarkRestrict = btn.dataset.restrict;
-      delete S.cachedPanes.bookmarks;
-      S.nextUrls.bookmarks = undefined;
-      renderBookmarksPane(ctx);
+      if (S[stateKey] === btn.dataset.filter) return;
+      S[stateKey] = btn.dataset.filter;
+      delete S.cachedPanes[tab];
+      S.nextUrls[tab] = undefined;
+      renderTabPane(ctx, tab);
     });
   });
+}
+
+function renderRecommendedPane(ctx) {
+  renderFilteredImagePane(ctx, "recommended", "为你推荐", "recommendRating", [
+    ["all", "全部"], ["safe", "全年龄"], ["r18", "R18"],
+  ]);
+}
+function renderFollowedPane(ctx) { renderImagePane(ctx, "followed", "关注画师的新作"); }
+function renderBookmarksPane(ctx) {
+  renderFilteredImagePane(ctx, "bookmarks", "我的收藏", "bookmarkRestrict", [
+    ["public", "公开"], ["private", "私人"],
+  ]);
 }
 
 // ── Ranking pane ──────────────────────────────────────────────────────────────
@@ -538,7 +547,7 @@ async function fetchImages(tab, nextUrl, S) {
   const np = nextUrl ? `&next_url=${encodeURIComponent(nextUrl)}` : "";
   const q  = nextUrl ? `?next_url=${encodeURIComponent(nextUrl)}` : "";
   const urls = {
-    recommended: `/pixiv/recommended${q}`,
+    recommended: `/pixiv/recommended?rating=${encodeURIComponent(S?.recommendRating || "all")}${np}`,
     followed:    `/pixiv/followed${q}`,
     ranking:     `/pixiv/ranking?mode=${encodeURIComponent(S?.rankingMode || "day")}${np}`,
     bookmarks:   `/pixiv/bookmarks?restrict=${encodeURIComponent(S?.bookmarkRestrict || "public")}${np}`,
@@ -546,9 +555,54 @@ async function fetchImages(tab, nextUrl, S) {
   const resp = await fetch(urls[tab]);
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
-    throw new Error(body.error || `HTTP ${resp.status}`);
+    const error = new Error(body.error || `HTTP ${resp.status}`);
+    error.code = body.code;
+    throw error;
   }
   return resp.json();
+}
+
+function renderWebSessionSetup(ctx, message) {
+  const pane = ctx.contentEl.querySelector(".px-grid-pane");
+  if (!pane) return;
+  pane.querySelector(".px-web-session-setup")?.remove();
+  pane.insertAdjacentHTML("afterbegin", `
+    <div class="px-web-session-setup">
+      <strong>配置 Pixiv Web 会话</strong>
+      <p>${esc(message)}</p>
+      <p>官网 Discovery 与 App Refresh Token 使用不同的登录会话。请从已登录 pixiv.net 的浏览器 Cookie 中复制 <code>PHPSESSID</code>；它只会保存在本机的 <code>config.json</code>。</p>
+      <div>
+        <input type="password" placeholder="粘贴 PHPSESSID" />
+        <button type="button">保存并加载 R18</button>
+      </div>
+      <a href="https://www.pixiv.net/discovery?mode=r18" target="_blank" rel="noopener">打开 Pixiv R18 新发现</a>
+      <span class="px-web-session-error"></span>
+    </div>
+  `);
+  const setup = pane.querySelector(".px-web-session-setup");
+  setup.querySelector("button").addEventListener("click", async () => {
+    const sessionId = setup.querySelector("input").value.trim();
+    const errorEl = setup.querySelector(".px-web-session-error");
+    if (!sessionId) return;
+    errorEl.textContent = "";
+    try {
+      const resp = await fetch("/pixiv/auth/set_web_session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ php_session_id: sessionId }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      ["all", "safe", "r18"].forEach(rating => {
+        persistedTabData.delete(`recommended:${rating}`);
+      });
+      delete ctx.S.cachedPanes.recommended;
+      ctx.S.nextUrls.recommended = undefined;
+      renderRecommendedPane(ctx);
+    } catch (e) {
+      errorEl.textContent = e.message;
+    }
+  });
 }
 
 async function loadMoreImages(ctx, tab) {
@@ -570,13 +624,21 @@ async function loadMoreImages(ctx, tab) {
     S.nextUrls[tab] = data.next_url ?? null;
 
     // Persist first page only — keeps restoration cost low (~30 cards)
-    if (!persistedTabData.has(cacheKey)) {
+    if (!persistedTabData.has(cacheKey) && data.illusts.length) {
       persistedTabData.set(cacheKey, { illusts: data.illusts, nextUrl: S.nextUrls[tab] });
     }
 
     const cols   = S.masonryCols[tab];
     const gridEl = contentEl.querySelector(".px-grid");
+    if (!data.illusts.length && S.nextUrls[tab] === null
+        && !cols?.some(col => col.childElementCount)) {
+      const message = tab === "recommended" && S.recommendRating === "r18"
+        ? "暂无 R18 内容"
+        : "暂无内容";
+      if (gridEl) gridEl.innerHTML = `<div class="px-empty" style="width:100%">${message}</div>`;
+    }
     for (const illust of data.illusts) {
+      if (contentEl.querySelector(`.px-card[data-id="${illust.id}"]`)) continue;
       const card = createCard(ctx, illust);
       if (cols?.length) masonryAdd(cols, card);
       else gridEl?.appendChild(card);
@@ -585,8 +647,13 @@ async function loadMoreImages(ctx, tab) {
       setTimeout(() => loadMoreImages(ctx, tab), 0);
     }
   } catch (e) {
-    pane?.insertAdjacentHTML("beforeend",
-      `<div class="px-error">加载失败: ${esc(e.message)}</div>`);
+    if (tab === "recommended" && S.recommendRating === "r18"
+        && e.code === "web_session_required") {
+      renderWebSessionSetup(ctx, e.message);
+    } else {
+      pane?.insertAdjacentHTML("beforeend",
+        `<div class="px-error">加载失败: ${esc(e.message)}</div>`);
+    }
   } finally {
     S.imageLoading.delete(cacheKey);
     if (loadEl) loadEl.style.display = "none";
@@ -753,7 +820,8 @@ function createCard(ctx, illust) {
   illustCache.set(String(illust.id), illust);
   const id = String(illust.id);
   const { S } = ctx;
-  const isMultiPage = illust.pages?.length > 1;
+  const pageCount = Math.max(illust.page_count || 1, illust.pages?.length || 1);
+  const isMultiPage = pageCount > 1;
 
   const card = document.createElement("div");
   card.className = "px-card";
@@ -763,7 +831,7 @@ function createCard(ctx, illust) {
   card.innerHTML = `
     <img src="${thumb}" alt="${esc(illust.title)}" loading="lazy" />
     <div class="px-card-title">${esc(illust.title)}</div>
-    ${isMultiPage ? `<div class="px-page-count-badge">${illust.pages.length}P</div>` : ""}
+    ${isMultiPage ? `<div class="px-page-count-badge">${pageCount}P</div>` : ""}
   `;
 
   // Bookmark button (toggle)
@@ -817,7 +885,7 @@ function createCard(ctx, illust) {
   });
   card.appendChild(pixivBtn);
 
-  if (isMultiPage) {
+  if (isMultiPage && illust.pages?.length === pageCount) {
     syncPostCard(ctx, card, illust);
   } else {
     const idx = S.selectedIds.indexOf(id);
@@ -827,9 +895,24 @@ function createCard(ctx, illust) {
     }
   }
 
-  card.addEventListener("click", () => {
-    if (isMultiPage) openPagePicker(ctx, illust);
-    else toggleCard(ctx, card, id);
+  card.addEventListener("click", async () => {
+    if (!isMultiPage) {
+      toggleCard(ctx, card, id);
+      return;
+    }
+    try {
+      if (illust.pages?.length !== pageCount) {
+        const resp = await fetch(`/pixiv/illust/${encodeURIComponent(id)}`);
+        const detail = await resp.json();
+        if (!resp.ok) throw new Error(detail.error || `HTTP ${resp.status}`);
+        Object.assign(illust, detail);
+        illustCache.set(id, illust);
+      }
+      openPagePicker(ctx, illust);
+    } catch (e) {
+      card.title = `加载作品分页失败: ${e.message}`;
+      console.error("[PixivBrowser] Failed to load artwork pages:", e);
+    }
   });
   return card;
 }

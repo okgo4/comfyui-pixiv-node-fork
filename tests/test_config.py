@@ -28,3 +28,14 @@ def test_save_preserves_existing_keys(tmp_path):
     data = json.loads(path.read_text())
     assert data["other_key"] == "value"
     assert data["refresh_token"] == "tok"
+
+
+def test_save_and_get_web_session(tmp_path):
+    path = tmp_path / "config.json"
+    config = Config(path)
+
+    config.save_refresh_token("tok")
+    config.save_web_session("web-session")
+
+    assert config.get_web_session() == "web-session"
+    assert json.loads(path.read_text())["refresh_token"] == "tok"

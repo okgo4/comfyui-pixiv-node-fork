@@ -86,6 +86,16 @@ pip install pixivpy3 Pillow
 
 > Token 保存在节点目录下的 `config.json`，请勿将此文件提交到 git（已自动加入 `.gitignore`）
 
+### R18 新发现
+
+Pixiv 官网的 R18 推荐来自 Web Discovery，与上面的 App Refresh Token 使用不同的登录会话。首次点击推荐栏的 **R18** 时：
+
+1. 在浏览器登录 [Pixiv R18 新发现](https://www.pixiv.net/discovery?mode=r18)，确认账号能够正常显示内容
+2. 打开浏览器开发者工具，在 Application/应用（或 Storage/存储）→ Cookies → `https://www.pixiv.net` 中复制 `PHPSESSID` 的值
+3. 将它粘贴到节点内出现的配置框，点击 **保存并加载 R18**
+
+`PHPSESSID` 只保存在本机的 `config.json`，请像密码一样妥善保管。它过期后，节点会提示重新配置。
+
 ---
 
 ## 使用方法

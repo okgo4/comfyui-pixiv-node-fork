@@ -4,7 +4,7 @@ try:
     import asyncio
 
     from .config import Config
-    from .pixiv_client import PixivClient, is_pximg_url
+    from .pixiv_client import PixivClient, WebSessionError, is_pximg_url
 
     _config = Config()
     _client_instance = PixivClient(_config)
@@ -23,6 +23,10 @@ try:
     async def _api_response(func, *args, **kwargs):
         try:
             return web.json_response(await _run_client(func, *args, **kwargs))
+        except WebSessionError as e:
+            return web.json_response(
+                {"error": str(e), "code": "web_session_required"}, status=401
+            )
         except RuntimeError as e:
             return web.json_response({"error": str(e)}, status=401)
         except Exception as e:
@@ -83,17 +87,42 @@ try:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=400)
 
+    @routes.post("/pixiv/auth/set_web_session")
+    async def pixiv_set_web_session(request):
+        data = await request.json()
+        session_id = data.get("php_session_id", "")
+        try:
+            await _run_client(_client_instance.set_web_session, session_id)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
     # ── Content ───────────────────────────────────────────────────────────────
 
     @routes.get("/pixiv/recommended")
     async def pixiv_recommended(request):
+        rating = request.query.get("rating", "all")
+        if rating not in {"all", "safe", "r18"}:
+            return web.json_response({"error": "invalid rating"}, status=400)
         next_url = request.query.get("next_url")
-        return await _api_response(_client_instance.get_recommended, next_url=next_url)
+        return await _api_response(
+            _client_instance.get_recommended,
+            next_url=next_url,
+            rating=rating,
+        )
 
     @routes.get("/pixiv/followed")
     async def pixiv_followed(request):
         next_url = request.query.get("next_url")
         return await _api_response(_client_instance.get_followed, next_url=next_url)
+
+    @routes.get("/pixiv/illust/{illust_id}")
+    async def pixiv_illust(request):
+        try:
+            illust_id = int(request.match_info["illust_id"])
+        except ValueError:
+            return web.json_response({"error": "invalid illust_id"}, status=400)
+        return await _api_response(_client_instance.get_illust, illust_id)
 
     @routes.get("/pixiv/ranking")
     async def pixiv_ranking(request):

@@ -381,6 +381,39 @@
 .px-rank-btn:hover { color: #cdd6f4; border-color: #7f849c; }
 .px-rank-btn.active { background: #313244; color: #cba6f7; border-color: #cba6f7; }
 
+.px-web-session-setup {
+  margin: 16px;
+  padding: 14px;
+  border: 1px solid #45475a;
+  border-radius: 6px;
+  color: #cdd6f4;
+  background: #181825;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.px-web-session-setup strong { color: #cba6f7; }
+.px-web-session-setup p { margin: 6px 0; }
+.px-web-session-setup > div { display: flex; gap: 6px; margin: 10px 0 6px; }
+.px-web-session-setup input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  color: #cdd6f4;
+  background: #11111b;
+}
+.px-web-session-setup button {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 4px;
+  color: #1e1e2e;
+  background: #cba6f7;
+  cursor: pointer;
+}
+.px-web-session-setup a { color: #89b4fa; }
+.px-web-session-error { display: block; color: #f38ba8; }
+
 .px-rank-grid-wrap {
   flex: 1;
   overflow: hidden;

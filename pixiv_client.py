@@ -4,6 +4,7 @@ import base64
 import re
 import time
 import requests
+from types import SimpleNamespace
 from urllib.parse import urlparse, parse_qs
 from pixivpy3 import AppPixivAPI
 
@@ -14,6 +15,10 @@ def is_pximg_url(url: str) -> bool:
     return parsed.scheme == "https" and (
         host == "pximg.net" or host.endswith(".pximg.net")
     )
+
+
+class WebSessionError(RuntimeError):
+    pass
 
 
 class PixivClient:
@@ -78,10 +83,100 @@ class PixivClient:
 
     # ── Data fetch ────────────────────────────────────────────────────────────
 
-    def get_recommended(self, next_url=None):
+    def get_recommended(self, next_url=None, rating="all"):
         self.ensure_logged_in()
+        if rating == "r18" or self.config.get_web_session():
+            return self._get_discovery(rating)
+
         kwargs = self._next_qs(next_url) if next_url else {}
-        return self._fmt_illusts(self.api.illust_recommended(**kwargs))
+        result = self.api.illust_recommended(**kwargs)
+        result.illusts = list(result.illusts or [])
+        if rating == "safe":
+            result.illusts = [
+                illust for illust in result.illusts
+                if not illust.x_restrict
+            ]
+            if not result.illusts:
+                result.next_url = None
+        return self._fmt_illusts(result)
+
+    def _get_discovery(self, mode, session_id=None):
+        session_id = session_id or self.config.get_web_session()
+        if not session_id:
+            raise WebSessionError(
+                "R18 新发现使用 Pixiv Web 会话，请先配置 PHPSESSID"
+            )
+        try:
+            response = self.http.get(
+                "https://www.pixiv.net/ajax/discovery/artworks",
+                params={"mode": mode, "limit": 60},
+                cookies={"PHPSESSID": session_id},
+                headers={
+                    "Accept": "application/json",
+                    "Referer": f"https://www.pixiv.net/discovery?mode={mode}",
+                    "User-Agent": "Mozilla/5.0",
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, ValueError) as e:
+            raise WebSessionError(
+                "Pixiv Web 会话无效或已过期，请重新配置 PHPSESSID"
+            ) from e
+
+        if payload.get("error"):
+            raise WebSessionError(
+                payload.get("message")
+                or "Pixiv Web 会话无效或无权访问 R18 新发现"
+            )
+        items = ((payload.get("body") or {}).get("thumbnails") or {}).get("illust")
+        if items is None:
+            raise WebSessionError("Pixiv Discovery 返回了无法识别的数据")
+        return {
+            "illusts": [self._fmt_discovery_illust(item) for item in items],
+            "next_url": "discovery" if items else None,
+        }
+
+    def set_web_session(self, session_id):
+        session_id = session_id.strip()
+        if not session_id or any(c.isspace() or c == ";" for c in session_id):
+            raise ValueError("PHPSESSID 格式无效")
+        self._get_discovery("safe", session_id=session_id)
+        self.config.save_web_session(session_id)
+
+    def _fmt_discovery_illust(self, item):
+        thumbnail = item.get("url") or ""
+        page = {
+            "index": 0,
+            "image_urls": {"medium": thumbnail, "large": thumbnail},
+            "original_url": "",
+        }
+        return {
+            "id": int(item["id"]),
+            "title": item.get("title") or "",
+            "width": item.get("width") or 0,
+            "height": item.get("height") or 0,
+            "image_urls": page["image_urls"],
+            "original_url": "",
+            "page_count": int(item.get("pageCount") or 1),
+            "pages": [page],
+            "is_bookmarked": bool(item.get("bookmarkData")),
+            "user": {
+                "id": int(item["userId"]),
+                "name": item.get("userName") or "",
+                "profile_image_urls": {
+                    "medium": item.get("profileImageUrl") or "",
+                },
+                "is_followed": False,
+            },
+        }
+
+    def get_illust(self, illust_id):
+        self.ensure_logged_in()
+        detail = self.api.illust_detail(illust_id).illust
+        result = SimpleNamespace(illusts=[detail], next_url=None)
+        return self._fmt_illusts(result)["illusts"][0]
 
     def get_followed(self, next_url=None):
         self.ensure_logged_in()
