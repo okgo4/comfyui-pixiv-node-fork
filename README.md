@@ -26,7 +26,7 @@
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/wrt122311/comfyui-pixiv-node.git
+git clone https://github.com/okgo4/comfyui-pixiv-node-fork.git
 ```
 
 ### 2. 安装依赖
