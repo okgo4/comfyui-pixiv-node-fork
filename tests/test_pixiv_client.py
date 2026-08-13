@@ -209,20 +209,21 @@ def test_get_recommended_uses_r18_discovery():
     assert result["illusts"][0]["page_count"] == 3
     assert result["illusts"][0]["is_bookmarked"] is True
     assert result["illusts"][0]["original_url"] == ""
-    assert result["next_url"] == "discovery"
+    assert result["next_url"] is None
 
 
-def test_get_recommended_uses_web_discovery_after_session_is_configured():
+def test_get_recommended_keeps_app_api_after_web_session_is_configured():
     client = make_client(token="tok", web_session="web-session")
     client._logged_in = True
     client._auth_time = time.time()
     client.api = MagicMock()
+    client.api.illust_recommended.return_value = _mock_result()
     client.http = MagicMock()
-    client.http.get.return_value = _discovery_response([_discovery_item()])
 
     client.get_recommended(rating="all")
 
-    assert client.http.get.call_args.kwargs["params"]["mode"] == "all"
+    client.api.illust_recommended.assert_called_once_with()
+    client.http.get.assert_not_called()
 
 
 def test_empty_discovery_stops_scrolling():
@@ -341,6 +342,60 @@ def test_get_ranking_passes_mode():
     client.get_ranking(mode="week")
 
     client.api.illust_ranking.assert_called_once_with(mode="week")
+
+
+@pytest.mark.parametrize(
+    ("mode", "web_session"),
+    [("daily_ai", None), ("daily_r18_ai", "web-session")],
+)
+def test_get_ranking_uses_web_for_ai_modes(mode, web_session):
+    client = make_client(token="tok", web_session=web_session)
+    client._logged_in = True
+    client.api = MagicMock()
+    response = MagicMock()
+    response.json.return_value = {"contents": [{
+        "illust_id": 123,
+        "title": "AI Art",
+        "width": 1024,
+        "height": 1536,
+        "url": "https://i.pximg.net/thumb.jpg",
+        "illust_page_count": "2",
+        "user_id": 456,
+        "user_name": "Artist",
+        "profile_img": "https://i.pximg.net/avatar.jpg",
+    }]}
+    client.http = MagicMock()
+    client.http.get.return_value = response
+
+    result = client.get_ranking(mode=mode)
+
+    expected = {
+        "params": {"mode": mode, "format": "json"},
+        "headers": {
+            "Accept": "application/json",
+            "Referer": f"https://www.pixiv.net/ranking.php?mode={mode}",
+            "User-Agent": "Mozilla/5.0",
+        },
+        "timeout": 30,
+    }
+    if web_session:
+        expected["cookies"] = {"PHPSESSID": web_session}
+    client.http.get.assert_called_once_with(
+        "https://www.pixiv.net/ranking.php", **expected
+    )
+    client.api.illust_ranking.assert_not_called()
+    assert result["illusts"][0]["id"] == 123
+    assert result["illusts"][0]["page_count"] == 2
+    assert result["next_url"] is None
+
+
+def test_get_r18_ai_ranking_requires_web_session():
+    client = make_client(token="tok")
+    client._logged_in = True
+    client._auth_time = time.time()
+
+    with pytest.raises(WebSessionError, match="PHPSESSID"):
+        client.get_ranking(mode="daily_r18_ai")
 
 
 def test_get_bookmarks_defaults_to_public():

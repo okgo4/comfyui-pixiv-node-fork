@@ -142,6 +142,7 @@ function initNodeBrowser(container, idsWidget) {
       artistListLoading: false,
       artistListVersion: 0,
       rankingMode: "day",
+      rankingRating: "safe",
       cachedPanes: {},
       pendingArtistId: null,
       masonryCols: {},
@@ -411,7 +412,7 @@ function imageCacheKey(tab, S) {
   return tab;
 }
 
-function renderImagePane(ctx, tab, title, controls = "") {
+function renderImagePane(ctx, tab, title, controls = "", endControls = "") {
   const { contentEl, S } = ctx;
   const cacheKey = imageCacheKey(tab, S);
   contentEl.innerHTML = `
@@ -419,6 +420,7 @@ function renderImagePane(ctx, tab, title, controls = "") {
       <div class="px-rank-bar">
         ${controls}
         <span style="flex:1;color:#7f849c;font-size:11px">${title}</span>
+        ${endControls}
         <button class="px-refresh-btn">↻ 刷新</button>
       </div>
       <div class="px-rank-grid-wrap">
@@ -480,66 +482,54 @@ function renderBookmarksPane(ctx) {
 }
 
 // ── Ranking pane ──────────────────────────────────────────────────────────────
-const RANKING_MODES = [
-  { id: "day",           label: "日榜" },
-  { id: "week",          label: "周榜" },
-  { id: "month",         label: "月榜" },
-  { id: "day_male",      label: "男性向" },
-  { id: "day_female",    label: "女性向" },
-  { id: "week_original", label: "原创" },
-  { id: "week_rookie",   label: "新人" },
-];
+const RANKING_MODES = {
+  safe: [
+    ["day", "今日"],
+    ["week", "本周"],
+    ["month", "本月"],
+    ["week_rookie", "新人"],
+    ["week_original", "原创"],
+    ["daily_ai", "AI生成"],
+    ["day_male", "受男性欢迎"],
+    ["day_female", "受女性欢迎"],
+  ],
+  r18: [
+    ["day_r18", "今日"],
+    ["week_r18", "本周"],
+    ["daily_r18_ai", "AI生成"],
+    ["day_male_r18", "受男性欢迎"],
+    ["day_female_r18", "受女性欢迎"],
+  ],
+};
 
 function renderRankingPane(ctx) {
   const { contentEl, S } = ctx;
-  contentEl.innerHTML = `
-    <div class="px-ranking-pane">
-      <div class="px-rank-bar">
-        ${RANKING_MODES.map(m =>
-          `<button class="px-rank-btn${S.rankingMode === m.id ? " active" : ""}" data-mode="${m.id}">${m.label}</button>`
-        ).join("")}
-        <span style="flex:1"></span>
-        <button class="px-refresh-btn">↻ 刷新</button>
-      </div>
-      <div class="px-rank-grid-wrap">
-        <div class="px-grid-pane">
-          <div class="px-grid"></div>
-          <div class="px-loading" style="display:none">加载中...</div>
-        </div>
-      </div>
-    </div>
-  `;
-  const restoreRanking = (mode) => {
-    const grid = contentEl.querySelector(".px-grid");
-    if (grid) S.masonryCols["ranking"] = setupMasonry(grid);
-    const rkCached = persistedTabData.get(`ranking:${mode}`);
-    if (rkCached?.illusts.length) {
-      S.nextUrls["ranking"] = rkCached.nextUrl;
-      for (const illust of rkCached.illusts) masonryAdd(S.masonryCols["ranking"], createCard(ctx, illust));
-    } else {
-      S.nextUrls["ranking"] = undefined;
-      loadMoreImages(ctx, "ranking");
-    }
-  };
+  const modes = RANKING_MODES[S.rankingRating];
+  const controls = modes.map(([id, label]) =>
+    `<button class="px-rank-btn${S.rankingMode === id ? " active" : ""}" data-mode="${id}">${label}</button>`
+  ).join("");
+  const ratings = [["safe", "全年龄"], ["r18", "R18"]].map(([id, label]) =>
+    `<button class="px-rank-btn${S.rankingRating === id ? " active" : ""}" data-rating="${id}">${label}</button>`
+  ).join("");
 
-  contentEl.querySelectorAll(".px-rank-btn").forEach(btn => {
+  renderImagePane(ctx, "ranking", "", controls, ratings);
+  contentEl.querySelectorAll("[data-mode]").forEach(btn => {
     btn.addEventListener("click", () => {
       if (S.rankingMode === btn.dataset.mode) return;
       S.rankingMode = btn.dataset.mode;
-      contentEl.querySelectorAll(".px-rank-btn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      restoreRanking(S.rankingMode);
+      delete S.cachedPanes.ranking;
+      renderRankingPane(ctx);
     });
   });
-  contentEl.querySelector(".px-refresh-btn").addEventListener("click", () => {
-    persistedTabData.delete(`ranking:${S.rankingMode}`);
-    delete S.cachedPanes["ranking"];
-    S.nextUrls["ranking"] = undefined;
-    renderRankingPane(ctx);
+  contentEl.querySelectorAll("[data-rating]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (S.rankingRating === btn.dataset.rating) return;
+      S.rankingRating = btn.dataset.rating;
+      S.rankingMode = RANKING_MODES[S.rankingRating][0][0];
+      delete S.cachedPanes.ranking;
+      renderRankingPane(ctx);
+    });
   });
-  restoreRanking(S.rankingMode);
-  setupInfiniteScroll(ctx, "ranking");
-  attachCustomScrollbar(contentEl.querySelector(".px-grid-pane"));
 }
 
 // ── Image fetch + load ────────────────────────────────────────────────────────
@@ -593,12 +583,19 @@ function renderWebSessionSetup(ctx, message) {
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-      ["all", "safe", "r18"].forEach(rating => {
-        persistedTabData.delete(`recommended:${rating}`);
-      });
-      delete ctx.S.cachedPanes.recommended;
-      ctx.S.nextUrls.recommended = undefined;
-      renderRecommendedPane(ctx);
+      if (ctx.S.activeTab === "ranking") {
+        persistedTabData.delete(imageCacheKey("ranking", ctx.S));
+        delete ctx.S.cachedPanes.ranking;
+        ctx.S.nextUrls.ranking = undefined;
+        renderRankingPane(ctx);
+      } else {
+        ["all", "safe", "r18"].forEach(rating => {
+          persistedTabData.delete(`recommended:${rating}`);
+        });
+        delete ctx.S.cachedPanes.recommended;
+        ctx.S.nextUrls.recommended = undefined;
+        renderRecommendedPane(ctx);
+      }
     } catch (e) {
       errorEl.textContent = e.message;
     }
@@ -647,8 +644,7 @@ async function loadMoreImages(ctx, tab) {
       setTimeout(() => loadMoreImages(ctx, tab), 0);
     }
   } catch (e) {
-    if (tab === "recommended" && S.recommendRating === "r18"
-        && e.code === "web_session_required") {
+    if (e.code === "web_session_required") {
       renderWebSessionSetup(ctx, e.message);
     } else {
       pane?.insertAdjacentHTML("beforeend",

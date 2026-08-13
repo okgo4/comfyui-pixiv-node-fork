@@ -85,7 +85,7 @@ class PixivClient:
 
     def get_recommended(self, next_url=None, rating="all"):
         self.ensure_logged_in()
-        if rating == "r18" or self.config.get_web_session():
+        if rating == "r18":
             return self._get_discovery(rating)
 
         kwargs = self._next_qs(next_url) if next_url else {}
@@ -135,7 +135,7 @@ class PixivClient:
             raise WebSessionError("Pixiv Discovery 返回了无法识别的数据")
         return {
             "illusts": [self._fmt_discovery_illust(item) for item in items],
-            "next_url": "discovery" if items else None,
+            "next_url": None,
         }
 
     def set_web_session(self, session_id):
@@ -185,8 +185,54 @@ class PixivClient:
 
     def get_ranking(self, mode='day', next_url=None):
         self.ensure_logged_in()
+        if mode in {"daily_ai", "daily_r18_ai"}:
+            return self._get_ai_ranking(mode)
         kwargs = self._next_qs(next_url) if next_url else {"mode": mode}
         return self._fmt_illusts(self.api.illust_ranking(**kwargs))
+
+    def _get_ai_ranking(self, mode):
+        kwargs = {
+            "params": {"mode": mode, "format": "json"},
+            "headers": {
+                "Accept": "application/json",
+                "Referer": f"https://www.pixiv.net/ranking.php?mode={mode}",
+                "User-Agent": "Mozilla/5.0",
+            },
+            "timeout": 30,
+        }
+        if mode == "daily_r18_ai":
+            session_id = self.config.get_web_session()
+            if not session_id:
+                raise WebSessionError("R18 AI 排行榜需要 Pixiv Web 会话，请先配置 PHPSESSID")
+            kwargs["cookies"] = {"PHPSESSID": session_id}
+
+        try:
+            response = self.http.get("https://www.pixiv.net/ranking.php", **kwargs)
+            response.raise_for_status()
+            items = response.json()["contents"]
+        except (requests.RequestException, ValueError, KeyError) as e:
+            if mode == "daily_r18_ai":
+                raise WebSessionError(
+                    "Pixiv Web 会话无效或已过期，请重新配置 PHPSESSID"
+                ) from e
+            raise
+        return {
+            "illusts": [self._fmt_ai_ranking_illust(item) for item in items],
+            "next_url": None,
+        }
+
+    def _fmt_ai_ranking_illust(self, item):
+        return self._fmt_discovery_illust({
+            "id": item["illust_id"],
+            "title": item.get("title"),
+            "width": item.get("width"),
+            "height": item.get("height"),
+            "url": item.get("url"),
+            "pageCount": item.get("illust_page_count"),
+            "userId": item["user_id"],
+            "userName": item.get("user_name"),
+            "profileImageUrl": item.get("profile_img"),
+        })
 
     def get_bookmarks(self, next_url=None, restrict="public"):
         self.ensure_logged_in()
