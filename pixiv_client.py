@@ -135,7 +135,7 @@ class PixivClient:
             raise WebSessionError("Pixiv Discovery 返回了无法识别的数据")
         return {
             "illusts": [self._fmt_discovery_illust(item) for item in items],
-            "next_url": None,
+            "next_url": "discovery" if items else None,
         }
 
     def set_web_session(self, session_id):

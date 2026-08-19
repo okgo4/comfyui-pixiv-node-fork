@@ -209,7 +209,7 @@ def test_get_recommended_uses_r18_discovery():
     assert result["illusts"][0]["page_count"] == 3
     assert result["illusts"][0]["is_bookmarked"] is True
     assert result["illusts"][0]["original_url"] == ""
-    assert result["next_url"] is None
+    assert result["next_url"] == "discovery"
 
 
 def test_get_recommended_keeps_app_api_after_web_session_is_configured():
